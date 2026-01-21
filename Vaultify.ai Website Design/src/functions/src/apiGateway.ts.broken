@@ -1,0 +1,218 @@
+// Get hotels by location (country/city) - REWRITTEN with proper mapping and debug
+app.get('/hotels/static/hotels-by-location', async (req, res) => {
+  const startMs = Date.now();
+  const debug: {
+    curatedCount: number;
+    hotellistCount: number;
+    afterCountry: number;
+    afterCity: number;
+    afterStars: number;
+    sample: Array<{ hotelId: string; country: string; city: string; cityId?: string; starRating: number }>;
+  } = {
+    curatedCount: 0,
+    hotellistCount: 0,
+    afterCountry: 0,
+    afterCity: 0,
+    afterStars: 0,
+    sample: [],
+  };
+
+  try {
+    const country = req.query.country ? String(req.query.country).toUpperCase() : undefined;
+    const cityId = req.query.cityId ? String(req.query.cityId) : undefined;
+    const cityName = req.query.cityName ? String(req.query.cityName) : undefined;
+    const city = cityName || req.query.city ? String(cityName || req.query.city) : undefined;
+    const minStars = req.query.minStars != null ? Number(req.query.minStars) : 0; // Default to 0
+
+    if (!country) {
+      res.status(400).json({ error: 'country_required', message: 'Country parameter is required', debug });
+      return;
+    }
+
+    // Helper: Map raw Wanderbeds hotel object to canonical shape
+    const mapHotel = (raw: any): any => {
+      return {
+        hotelId: String(raw.hotelid ?? raw.hotelId ?? ''),
+        name: String(raw.name ?? raw.hotelname ?? ''),
+        starRating: raw.starrating != null || raw.starRating != null ? Number(raw.starrating ?? raw.starRating ?? 0) : 0,
+        cityId: raw.cityid != null || raw.cityId != null ? String(raw.cityid ?? raw.cityId ?? '') : undefined,
+        city: String(raw.city ?? raw.cityname ?? ''),
+        country: String(raw.country ?? ''),
+        address: String(raw.address ?? ''),
+        lat: raw.lat != null ? Number(raw.lat) : undefined,
+        lng: raw.lng != null ? (raw.lng ?? raw.lon) != null ? Number(raw.lng ?? raw.lon) : undefined : undefined,
+      };
+    };
+
+    // Helper: Filter by country (case-insensitive uppercase)
+    const filterByCountry = (hotels: any[], countryCode: string): any[] => {
+      const countryUpper = countryCode.toUpperCase();
+      return hotels.filter((h) => {
+        const hCountry = (h.country || '').toUpperCase();
+        return hCountry === countryUpper;
+      });
+    };
+
+    // Helper: Filter by city
+    const filterByCity = (hotels: any[], cityIdParam?: string, cityNameParam?: string, countryParam?: string): any[] => {
+      if (!cityIdParam && !cityNameParam) return hotels;
+      
+      // Never filter by city if cityName equals country name
+      if (cityNameParam && countryParam && cityNameParam.toLowerCase() === countryParam.toLowerCase()) {
+        return hotels;
+      }
+
+      return hotels.filter((h) => {
+        // Prefer cityId exact match
+        if (cityIdParam && h.cityId) {
+          return String(h.cityId) === String(cityIdParam);
+        }
+        
+        // Fallback to city name fuzzy match
+        if (cityNameParam && h.city) {
+          const hCity = h.city.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ');
+          const cityLower = cityNameParam.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ');
+          return hCity.includes(cityLower) || cityLower.includes(hCity) || hCity === cityLower;
+        }
+        
+        return false;
+      });
+    };
+
+    // Helper: Filter by minStars
+    const filterByStars = (hotels: any[], minStarsParam: number): any[] => {
+      if (minStarsParam == null || !Number.isFinite(minStarsParam)) return hotels;
+      return hotels.filter((h) => {
+        return Number.isFinite(h.starRating) && h.starRating >= minStarsParam;
+      });
+    };
+
+    let result: any[] = [];
+    let source = 'error';
+
+    // STEP 1: Try curated collection (vendors/wanderbeds/curation/hotels/{hotelId})
+    try {
+      // FIXED: Use correct path vendors/wanderbeds/curation/hotels (no /items)
+      const curatedRef = admin.firestore().collection('vendors/wanderbeds/curation/hotels');
+      const curatedSnapshot = await curatedRef.where('country', '==', country).limit(500).get();
+      debug.curatedCount = curatedSnapshot.size;
+
+      if (curatedSnapshot.size > 0) {
+        result = curatedSnapshot.docs.map((doc) => {
+          const data = doc.data();
+          return mapHotel({
+            hotelid: data.hotelId || doc.id,
+            hotelId: data.hotelId || doc.id,
+            name: data.name,
+            starrating: data.starRating,
+            starRating: data.starRating,
+            cityid: data.cityId,
+            cityId: data.cityId,
+            city: data.city,
+            country: data.country,
+            address: data.address,
+            lat: data.lat,
+            lng: data.lng,
+          });
+        });
+        source = 'curated';
+      }
+    } catch (curatedErr: any) {
+      functions.logger.warn('[hotels-by-location] curated query failed', { error: curatedErr?.message, country });
+    }
+
+    // STEP 2: Fallback to hotellist if curated is empty
+    if (result.length === 0) {
+      try {
+        const data = await Promise.race([
+          getHotelList({ bypassCache: false, timeoutMs: 20000, allowStale: true }),
+          new Promise<any>((_, reject) => setTimeout(() => reject(new Error('Hotellist timeout')), 20000)),
+        ]);
+
+        const hotelsRaw = data?.hotels || data?.data?.hotels || [];
+        const hotelsArray = Array.isArray(hotelsRaw) ? hotelsRaw : [];
+        debug.hotellistCount = hotelsArray.length;
+
+        // MAP to canonical shape BEFORE filtering
+        result = hotelsArray.map(mapHotel);
+        source = 'hotellist_fallback';
+      } catch (hotellistErr: any) {
+        functions.logger.warn('[hotels-by-location] hotellist fallback failed', {
+          error: hotellistErr?.message,
+          country,
+        });
+        res.json({
+          hotels: [],
+          total: 0,
+          source: 'error',
+          error: 'hotellist_failed',
+          message: 'Unable to load hotels',
+          debug,
+        });
+        return;
+      }
+    }
+
+    // STEP 3: Apply filters (using canonical shape)
+    debug.afterCountry = result.length;
+    result = filterByCountry(result, country);
+    debug.afterCountry = result.length;
+
+    debug.afterCity = result.length;
+    result = filterByCity(result, cityId, cityName, country);
+    debug.afterCity = result.length;
+
+    debug.afterStars = result.length;
+    result = filterByStars(result, minStars);
+    debug.afterStars = result.length;
+
+    // Limit to first 100
+    result = result.slice(0, 100);
+
+    // Filter out invalid hotelIds
+    result = result.filter((h) => h.hotelId && String(h.hotelId).trim().length > 0);
+
+    // Set debug sample
+    debug.sample = result.slice(0, 5).map((h) => ({
+      hotelId: h.hotelId,
+      country: h.country,
+      city: h.city,
+      cityId: h.cityId,
+      starRating: h.starRating,
+    }));
+
+    const durationMs = Date.now() - startMs;
+    functions.logger.info('[hotels-by-location] complete', {
+      country,
+      cityId,
+      cityName,
+      minStars,
+      resultCount: result.length,
+      source,
+      durationMs,
+      debug,
+    });
+
+    res.json({
+      hotels: result,
+      total: result.length,
+      source,
+      debug,
+    });
+  } catch (err: any) {
+    const durationMs = Date.now() - startMs;
+    functions.logger.error('[hotels-by-location] error', {
+      error: err?.message,
+      stack: err?.stack,
+      durationMs,
+    });
+    res.status(500).json({
+      hotels: [],
+      total: 0,
+      source: 'error',
+      error: 'server_error',
+      message: err?.message || 'Internal server error',
+      debug,
+    });
+  }
+});

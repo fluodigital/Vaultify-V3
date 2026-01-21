@@ -1,0 +1,47 @@
+{
+  "name": "vaultify-functions",
+  "version": "1.0.0",
+  "description": "Cloud Functions for Vaultify.ai",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc && node ./scripts/copy-prompts.js",
+    "build:watch": "tsc --watch",
+    "serve": "npm run build && firebase emulators:start --only functions",
+    "shell": "npm run build && firebase functions:shell",
+    "start": "npm run shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log",
+    "test": "ts-node --transpile-only test/index.ts",
+    "alfred:dev": "ts-node --transpile-only scripts/alfred-dev.ts"
+  },
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "@circle-fin/circle-sdk": "^1.1.0",
+    "@sendgrid/mail": "^8.1.0",
+    "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^5.0.0",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.24.1",
+    "stream-chain": "^3.4.0",
+    "stream-json": "^1.8.0",
+    "stripe": "^14.11.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/node": "^20.19.30",
+    "@types/stream-json": "^1.7.8",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "firebase-functions-test": "^3.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "private": true
+}

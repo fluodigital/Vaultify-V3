@@ -1,0 +1,36 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    
+    // User profile photos
+    match /users/{userId}/profile/{fileName} {
+      allow read: if true;  // Public read
+      allow write: if isOwner(userId) && 
+        request.resource.size < 5 * 1024 * 1024 &&  // Max 5MB
+        request.resource.contentType.matches('image/.*');  // Images only
+    }
+    
+    // User documents (ID verification, etc.)
+    match /users/{userId}/documents/{fileName} {
+      allow read: if isOwner(userId);
+      allow write: if isOwner(userId) && 
+        request.resource.size < 10 * 1024 * 1024;  // Max 10MB
+    }
+    
+    // Booking attachments
+    match /bookings/{bookingId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && 
+        request.resource.size < 10 * 1024 * 1024;
+    }
+  }
+}
